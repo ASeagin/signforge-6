@@ -1170,7 +1170,7 @@ footer{border-top:1px solid rgba(255,255,255,.07);padding:56px 0 28px;background
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-<script src="https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
 <script>
 pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
@@ -1618,95 +1618,120 @@ function enableDL(){if(pdfDoc&&sigDataURL)document.getElementById('dl-btn').disa
 let originalPdfBytes = null;
 
 async function signAndDownload(){
-  if(!pdfDoc||!sigDataURL)return;
-  const btn=document.getElementById('dl-btn'),lbl=document.getElementById('sign-lbl');
-  btn.disabled=true; lbl.textContent='Generating signed PDF…'; lbl.className='status-lbl';
+  if(!pdfDoc){ alert('Please upload a PDF first in Step 1.'); return; }
+  if(!sigDataURL){ alert('Please add your signature first in Step 2.'); return; }
 
-  try{
-    const pCanvas=document.getElementById('pdf-canvas');
-    const overlay=document.getElementById('sig-overlay');
-    const wrap=document.querySelector('.pdf-viewer-wrap');
-    const cr=pCanvas.getBoundingClientRect();
-    const or=overlay.getBoundingClientRect();
+  const btn = document.getElementById('dl-btn');
+  const lbl = document.getElementById('sign-lbl');
+  btn.disabled = true;
+  lbl.textContent = '⏳ Generating signed PDF…';
+  lbl.className = 'status-lbl';
 
-    // Scale overlay position back to PDF coordinate space
-    const scaleX=pCanvas.width/cr.width;
-    const scaleY=pCanvas.height/cr.height;
-    const sx=(or.left-cr.left)*scaleX;
-    const sy=(or.top-cr.top)*scaleY;
-    const sw=or.width*scaleX;
-    const sh=or.height*scaleY;
+  try {
+    const pCanvas = document.getElementById('pdf-canvas');
+    const overlay = document.getElementById('sig-overlay');
 
-    // ── Try real PDF embedding first (if original PDF was uploaded) ──
-    if(originalPdfBytes && window.PDFLib){
-      const { PDFDocument } = PDFLib;
-      const pdfDoc2 = await PDFDocument.load(originalPdfBytes);
-      const pages = pdfDoc2.getPages();
-      const page = pages[curPage-1];
-      const { width: pW, height: pH } = page.getSize();
-
-      // Convert canvas coords to PDF coords (PDF origin is bottom-left)
-      const ratioX = pW / pCanvas.width;
-      const ratioY = pH / pCanvas.height;
-      const pdfX = sx * ratioX;
-      const pdfY = pH - (sy * ratioY) - (sh * ratioY); // flip Y axis
-      const pdfW = sw * ratioX;
-      const pdfH = sh * ratioY;
-
-      // Convert signature dataURL to bytes
-      const sigBase64 = sigDataURL.split(',')[1];
-      const sigBytes = Uint8Array.from(atob(sigBase64), c => c.charCodeAt(0));
-      const sigImage = sigDataURL.includes('image/png')
-        ? await pdfDoc2.embedPng(sigBytes)
-        : await pdfDoc2.embedJpg(sigBytes);
-
-      page.drawImage(sigImage, { x:pdfX, y:pdfY, width:pdfW, height:pdfH });
-
-      const signedBytes = await pdfDoc2.save();
-      const blob = new Blob([signedBytes], { type:'application/pdf' });
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = 'SignForge_signed.pdf';
-      a.click();
-      URL.revokeObjectURL(a.href);
-
-    } else {
-      // ── Fallback: flatten to image (for image uploads or if pdf-lib not loaded) ──
-      const out=document.createElement('canvas');
-      out.width=pCanvas.width; out.height=pCanvas.height;
-      const ctx=out.getContext('2d');
-      ctx.drawImage(pCanvas,0,0);
-      const img=new Image();
-      await new Promise((res,rej)=>{img.onload=res;img.onerror=rej;img.src=sigDataURL});
-      ctx.drawImage(img,sx,sy,sw,sh);
-      out.toBlob(blob=>{
-        const a=document.createElement('a');
-        a.href=URL.createObjectURL(blob);
-        a.download='SignForge_signed.png';
-        a.click();
-        URL.revokeObjectURL(a.href);
-      },'image/png');
+    // If signature not placed yet — auto place bottom right
+    if(overlay.classList.contains('hidden')){
+      placeSig(
+        Math.round(pCanvas.width  * 0.62),
+        Math.round(pCanvas.height * 0.84),
+        Math.round(pCanvas.width  * 0.28),
+        Math.round(pCanvas.height * 0.07)
+      );
+      await new Promise(r => setTimeout(r, 300));
     }
 
-    lbl.textContent='✓ Signed document downloaded!';
-    lbl.className='status-lbl ok';
+    const cr = pCanvas.getBoundingClientRect();
+    const or = overlay.getBoundingClientRect();
 
-    // Log the document
-    api('/user/documents','POST',{
-      filename:'SignForge_signed.pdf',
-      originalName: currentFileName || 'signed-document.pdf'
-    }).then(()=>{
-      if(user) user.trialUsed=true;
-    }).catch(()=>{});
+    // Scale from display pixels → canvas pixels
+    const scaleX = pCanvas.width  / cr.width;
+    const scaleY = pCanvas.height / cr.height;
 
-    btn.disabled=false;
+    const sx = (or.left - cr.left) * scaleX;
+    const sy = (or.top  - cr.top)  * scaleY;
+    const sw = or.width  * scaleX;
+    const sh = or.height * scaleY;
 
-  }catch(ex){
-    console.error(ex);
-    lbl.textContent='Error generating document — try again.';
-    lbl.className='status-lbl err';
-    btn.disabled=false;
+    // ── Method 1: Real PDF embedding ──────────────────────
+    if(originalPdfBytes && window.PDFLib){
+      try{
+        const { PDFDocument } = PDFLib;
+        const pdfDoc2 = await PDFDocument.load(originalPdfBytes, { ignoreEncryption:true });
+        const pages   = pdfDoc2.getPages();
+        const page    = pages[Math.min(curPage-1, pages.length-1)];
+        const { width:pW, height:pH } = page.getSize();
+
+        const rx = pW / pCanvas.width;
+        const ry = pH / pCanvas.height;
+
+        const pdfX =  sx * rx;
+        const pdfY =  pH - (sy * ry) - (sh * ry);
+        const pdfW =  sw * rx;
+        const pdfH =  sh * ry;
+
+        const base64 = sigDataURL.split(',')[1];
+        const bytes  = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+        const isPng  = sigDataURL.startsWith('data:image/png');
+        const img    = isPng ? await pdfDoc2.embedPng(bytes) : await pdfDoc2.embedJpg(bytes);
+
+        page.drawImage(img, { x:pdfX, y:pdfY, width:pdfW, height:pdfH });
+
+        const out  = await pdfDoc2.save();
+        const blob = new Blob([out], { type:'application/pdf' });
+        triggerDownload(blob, (currentFileName||'document').replace(/\.[^.]+$/,'')+'_signed.pdf');
+        lbl.textContent = '✅ Signed PDF downloaded!';
+        lbl.className = 'status-lbl ok';
+        logDocument();
+        btn.disabled = false;
+        return;
+      } catch(e){ console.warn('pdf-lib error, using canvas fallback:', e); }
+    }
+
+    // ── Method 2: Canvas flatten — ALWAYS works ───────────
+    const out = document.createElement('canvas');
+    out.width  = pCanvas.width;
+    out.height = pCanvas.height;
+    const ctx  = out.getContext('2d');
+    ctx.drawImage(pCanvas, 0, 0);
+
+    const sigImg = new Image();
+    sigImg.crossOrigin = 'anonymous';
+    await new Promise((res, rej) => { sigImg.onload=res; sigImg.onerror=rej; sigImg.src=sigDataURL; });
+    ctx.drawImage(sigImg, sx, sy, sw, sh);
+
+    out.toBlob(blob => {
+      if(!blob){ lbl.textContent='❌ Could not create file. Try a different browser.'; lbl.className='status-lbl err'; btn.disabled=false; return; }
+      triggerDownload(blob, (currentFileName||'document').replace(/\.[^.]+$/,'')+'_signed.png');
+      lbl.textContent = '✅ Signed document downloaded!';
+      lbl.className = 'status-lbl ok';
+      logDocument();
+      btn.disabled = false;
+    }, 'image/png', 0.95);
+
+  } catch(ex){
+    console.error('Download error:', ex);
+    lbl.textContent = '❌ ' + (ex.message || 'Something went wrong — try again');
+    lbl.className = 'status-lbl err';
+    btn.disabled = false;
   }
+}
+
+function triggerDownload(blob, filename) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+}
+
+function logDocument() {
+  api('/user/documents', 'POST', {
+    filename: (currentFileName || 'signed-document.pdf'),
+    originalName: (currentFileName || 'signed-document.pdf')
+  }).then(() => { if(user) user.trialUsed = true; }).catch(() => {});
 }
 
 // ═══════════════════════════════════════
